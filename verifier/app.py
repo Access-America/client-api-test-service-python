@@ -1,185 +1,183 @@
-#!/usr/bin/python
-
-from flask import Flask
-from flask import request,Response,redirect
-from flask_caching import Cache
-from flask.json import jsonify
+import base64
 import json
 import logging
-import sys, os, tempfile, uuid, time, datetime
-import configparser
-import argparse
+import uuid
+from datetime import datetime, timezone
+
 import requests
-import jwt, base64
+from flask import Flask
+from flask import request, redirect
+from flask_caching import Cache
 
-cacheConfig = {
-    "DEBUG": True,          # some Flask specific configs
-    "CACHE_TYPE": "SimpleCache",  # Flask-Caching related configs
-    "CACHE_DEFAULT_TIMEOUT": 300
+cache_config = {
+    'DEBUG': True,  # some Flask specific configs
+    'CACHE_TYPE': 'SimpleCache',  # Flask-Caching related configs
+    'CACHE_DEFAULT_TIMEOUT': 300
 }
-app = Flask(__name__,static_url_path='',static_folder='static',template_folder='static')
+app = Flask(__name__, static_url_path='', static_folder='static', template_folder='static')
 
-app.config.from_mapping(cacheConfig)
+app.config.from_mapping(cache_config)
 cache = Cache(app)
 
-log = logging.getLogger() 
+log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-fP = open(sys.argv[1],)
-presentationConfig = json.load(fP)
-fP.close()  
+presentation_file = 'presentation_request_config_v2.json'
+with open(presentation_file) as f:
+    presentation_config = json.load(f)
 
-print( presentationConfig["presentation"]["requestedCredentials"][0]["manifest"] )
+manifest_url = presentation_config['presentation']['requestedCredentials'][0]['manifest']
+manifest = requests.get(manifest_url).json()
 
-r = requests.get(url = str(presentationConfig["presentation"]["requestedCredentials"][0]["manifest"]) )
-manifest = r.json()
-print( manifest )
+presentation_config['registration']['clientName'] = 'Python Client API Verifier'
+presentation_config['presentation']['requestedCredentials'][0]['trustedIssuers'][0] = manifest['input']['issuer']
 
-presentationConfig["registration"]["clientName"] = "Python Client API Verifier"
-if not str(presentationConfig["authority"]).startswith("did:ion:"):
-    presentationConfig["authority"] = manifest["input"]["issuer"]
-presentationConfig["presentation"]["requestedCredentials"][0]["trustedIssuers"][0] = manifest["input"]["issuer"]
-if str(presentationConfig["presentation"]["requestedCredentials"][0]["type"]) == "":
-    presentationConfig["presentation"]["requestedCredentials"][0]["type"] = manifest["id"]
+if not presentation_config['authority'].startswith('did:ion:'):
+    presentation_config['authority'] = manifest['input']['issuer']
+
+if not presentation_config['presentation']['requestedCredentials'][0]['type']:
+    presentation_config['presentation']['requestedCredentials'][0]['type'] = manifest['id']
+
 
 @app.route('/')
 def root():
     return app.send_static_file('index.html')
 
-@app.route("/logo.png", methods = ['GET'])
-def logoRedirector():    
-    return redirect(str(manifest["display"]["card"]["logo"]["uri"]) )
 
-@app.route("/echo", methods = ['GET'])
-def echoApi():
+@app.route('/logo.png', methods=['GET'])
+def logo_redirector():
+    return redirect(str(manifest['display']['card']['logo']['uri']))
+
+
+@app.route('/echo', methods=['GET'])
+def echo():
+    credentials = presentation_config['presentation']['requestedCredentials'][0]
     result = {
-        'date': datetime.datetime.utcnow().isoformat(),
+        'date': datetime.now(tz=timezone.utc).isoformat(),
         'api': request.url,
         'Host': request.headers.get('host'),
         'x-forwarded-for': request.headers.get('x-forwarded-for'),
         'x-original-host': request.headers.get('x-original-host'),
-        'issuerDid':  presentationConfig["presentation"]["requestedCredentials"][0]["trustedIssuers"][0],
-        'credentialType': presentationConfig["presentation"]["requestedCredentials"][0]["type"],
-        'client_purpose': presentationConfig["presentation"]["requestedCredentials"][0]["purpose"],
-        'displayCard': manifest["display"]["card"],
-        'buttonColor': "#000080"
+        'issuerDid': credentials['trustedIssuers'][0],
+        'credentialType': credentials['type'],
+        'client_purpose': credentials['purpose'],
+        'displayCard': manifest['display']['card'],
+        'buttonColor': '#000080'
     }
-    return Response( json.dumps(result), status=200, mimetype='application/json')
+    return result
 
-@app.route("/presentation-request", methods = ['GET'])
-def presentationRequest():
-    id = str(uuid.uuid4())
-    payload = presentationConfig.copy()
-    payload["callback"]["url"] = str(request.url_root).replace("http://", "https://") + "presentation-request-api-callback"
-    payload["callback"]["state"] = id
-    print( json.dumps(payload) )
-    post_headers = {"content-type": "application/json"}
-    r = requests.post('https://dev.did.msidentity.com/v1.0/abc/verifiablecredentials/request'
-                    , headers=post_headers, data=json.dumps(payload))
-    resp = r.json()
-    print(resp)
-    resp["id"] = id            
-    return Response( json.dumps(resp), status=200, mimetype='application/json')
 
-@app.route("/presentation-request-api-callback", methods = ['GET'])
-def presentationRequestApiCallbackGET():
+@app.route('/presentation-request', methods=['GET'])
+def presentation_request():
+    id_ = str(uuid.uuid4())
+    payload = presentation_config.copy()
+    payload['callback']['url'] = request.url_root.replace('http://', 'https://') + 'presentation-request-api-callback'
+    payload['callback']['state'] = id_
+    response = requests.post('https://dev.did.msidentity.com/v1.0/abc/verifiablecredentials/request', json=payload)
+    response = response.json()
+    response['id'] = id_
+    return response
+
+
+@app.route('/presentation-request-api-callback', methods=['GET'])
+def presentation_request_api_callback_get():
     print('test')
-    return ""
+    return ''
 
-@app.route("/presentation-request-api-callback", methods = ['POST'])
-def presentationRequestApiCallback():
-    presentationResponse = request.json
-    print(presentationResponse)
-    if presentationResponse["code"] == "request_retrieved":
-        cacheData = {
-            "status": 1,
-            "message": "QR Code is scanned. Waiting for validation..."
+
+@app.route('/presentation-request-api-callback', methods=['POST'])
+def presentation_request_api_callback():
+    presentation_response = request.json
+    print(presentation_response)
+    if presentation_response['code'] == 'request_retrieved':
+        cache_data = {
+            'status': 1,
+            'message': 'QR Code is scanned. Waiting for validation...'
         }
-        cache.set( presentationResponse["state"], json.dumps(cacheData) )
-        return ""
-    if presentationResponse["code"] == "presentation_verified":
-        cacheData = {
-            "status": 2,
-            "message": "VC Presented",
-            "presentationResponse": presentationResponse
+        cache.set(presentation_response['state'], json.dumps(cache_data))
+        return ''
+    if presentation_response['code'] == 'presentation_verified':
+        cache_data = {
+            'status': 2,
+            'message': 'VC Presented',
+            'presentationResponse': presentation_response
         }
-        cache.set( presentationResponse["state"], json.dumps(cacheData) )
-        return ""
-    return ""
+        cache.set(presentation_response['state'], json.dumps(cache_data))
+        return ''
 
-@app.route("/presentation-response-status", methods = ['GET'])
-def presentationRequestStatus():
-    id = request.args.get('id')
-    print(id)
-    data = cache.get(id)
-    print(data)
-    if data is not None:
-        cacheData = json.loads(data)
-        if cacheData["status"] == 1:
-            browserData = {
-                'status': cacheData["status"],
-                'message': cacheData["message"]
-            }
-        if cacheData["status"] == 2:
-            browserData = {
-                'status': cacheData["status"],
-                'message': cacheData["message"],
-                'claims': cacheData["presentationResponse"]["issuers"][0]["claims"]
-            }
-        return Response( json.dumps(browserData), status=200, mimetype='application/json')
-    else:
-        return ""
 
-def decodeJwtToken(token):
-    return json.loads( base64.b64decode(token.split('.')[1]+'==').decode("utf-8") )
+@app.route('/presentation-response-status', methods=['GET'])
+def presentation_request_status():
+    id_ = request.args.get('id')
+    data = cache.get(id_)
+    if not data:
+        return ''
 
-@app.route("/presentation-response-b2c", methods = ['POST'])
-def presentationResponseB2C():
-    presentationResponse = request.json
-    id = presentationResponse["id"]
-    print(id)
-    data = cache.get(id)
-    print(data)
-    if data is not None:
-        cacheData = json.loads(data)
-        if cacheData["status"] == 2:
-            jwtSIOP = decodeJwtToken( cacheData["presentationResponse"]["receipt"]["id_token"] )
-            jwtVP = None
-            for pres in jwtSIOP["attestations"]["presentations"]:
-                jwtVP = decodeJwtToken( jwtSIOP["attestations"]["presentations"][pres] )
-            jwtVC = decodeJwtToken( jwtVP["vp"]["verifiableCredential"][0] )
-            claims = cacheData["presentationResponse"]["issuers"][0]["claims"]
-            tid = None
-            oid = None
-            username = None
-            if "sub" in claims:
-                oid = claims["sub"]
-            if "tid" in claims:
-                tid = claims["tid"]
-            if "username" in claims:
-                username = claims["username"]
-            responseBody = {
-               'id': id, 
-               'credentialsVerified': True,
-               'credentialType': presentationConfig["presentation"]["requestedCredentials"][0]["type"],
-               'displayName': claims["firstName"] + " " + claims["lastName"],
-               'givenName': claims["firstName"],
-               'surName': claims["lastName"],
-               'iss': jwtVC["iss"],    # who issued this VC?
-               'sub': jwtVC["sub"],    # who are you?
-               'key': jwtVC["sub"].replace("did:ion:", "did.ion.").split(":")[0].replace("did.ion.", "did:ion:"),
-               'oid': oid,
-               'tid': tid,
-               'username': username 
-            }
-            return Response( json.dumps(responseBody), status=200, mimetype='application/json')
+    cache_data = json.loads(data)
+    browser_data = {
+        'status': cache_data['status'],
+        'message': cache_data['message']
+    }
 
-    errmsg = {
-        'version': '1.0.0', 
-        'status': 400,
-        'userMessage': 'Verifiable Credentials not presented'
+    if cache_data['status'] == 2:
+        browser_data['claims'] = cache_data['presentationResponse']['issuers'][0]['claims']
+
+    return browser_data
+
+
+def decode_jwt_token(token):
+    return json.loads(base64.b64decode(token.split('.')[1] + '==').decode('utf-8'))
+
+
+@app.route('/presentation-response-b2c', methods=['POST'])
+def presentation_response_b2_c():
+    presentation_response = request.json
+    id_ = presentation_response['id']
+    data = cache.get(id_)
+    if not data:
+        return {
+            'version': '1.0.0',
+            'status': 400,
+            'userMessage': 'Verifiable Credentials not presented'
         }
-    return Response( json.dumps(errmsg), status=409, mimetype='application/json')
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8082)
+    cache_data = json.loads(data)
+    if cache_data['status'] != 2:
+        return {
+            'version': '1.0.0',
+            'status': 400,
+            'userMessage': 'Verifiable Credentials not presented'
+        }
+
+    jwt_siop = decode_jwt_token(cache_data['presentationResponse']['receipt']['id_token'])
+    jwt_vp = None
+
+    presentations = jwt_siop['attestations']['presentations']
+    for p in presentations:
+        jwt_vp = decode_jwt_token(presentations[p])
+
+    claims = cache_data['presentationResponse']['issuers'][0]['claims']
+    tid = claims.get('tid')
+    oid = claims.get('sub')
+    username = claims.get('username')
+
+    jwt_vc = decode_jwt_token(jwt_vp['vp']['verifiableCredential'][0])
+    response = {
+        'id': id_,
+        'credentialsVerified': True,
+        'credentialType': presentation_config['presentation']['requestedCredentials'][0]['type'],
+        'displayName': claims['firstName'] + ' ' + claims['lastName'],
+        'givenName': claims['firstName'],
+        'surName': claims['lastName'],
+        'iss': jwt_vc['iss'],  # who issued this VC?
+        'sub': jwt_vc['sub'],  # who are you?
+        'key': jwt_vc['sub'].replace('did:ion:', 'did.ion.').split(':')[0].replace('did.ion.', 'did:ion:'),
+        'oid': oid,
+        'tid': tid,
+        'username': username
+    }
+    return response
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8082)
